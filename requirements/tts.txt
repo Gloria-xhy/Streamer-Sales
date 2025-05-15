@@ -2,7 +2,8 @@
 modelscope==1.14.0
 
 # TTS 2.0
-LangSegment==0.3.3
+#LangSegment==0.3.3
+LangSegment==0.2.0
 librosa==0.9.2
 ffmpeg-python==0.2.0
 pytorch-lightning==2.2.5

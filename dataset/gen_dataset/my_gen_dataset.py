@@ -10,7 +10,7 @@ import dashscope
 import requests
 import yaml
 from tqdm import tqdm
-
+from myproduct import products_db
 
 def set_api_key(api_type, api_yaml_path):
     """设置 api key
@@ -224,6 +224,8 @@ def gen_dataset(dastset_yaml_path: str, api_yaml_path: str, save_json_root: Path
     # gen_model_type += [dashscope.Generation.Models.qwen_max] * 2
     qwen_model_type = [dashscope.Generation.Models.qwen_max] * gen_num
 
+    
+
     for role_type, role_character in dataset_yaml["role_type"].items():
 
         if specific_name != "" and role_type != specific_name:
@@ -259,96 +261,87 @@ def gen_dataset(dastset_yaml_path: str, api_yaml_path: str, save_json_root: Path
         pbar = tqdm(total=len(list_product))
 
         # 遍历产品
-        for _, products in dataset_yaml["product_list"].items():
-            for _, product_name_list in products.items():
-                for product, hightlights in product_name_list.items():
-                    pbar.set_description(product)
+        for pid, prod in products_db.items():
+            pbar.set_description(prod['name'])
 
-                    if product in gen_json:
-                        # 跳过已经有的
-                        pbar.update(1)
-                        continue
+            if prod['name'] in gen_json:
+                # 跳过已经有的
+                pbar.update(1)
+                continue
 
-                    gen_json.update({product: []})
+            gen_json.update({prod['name']: []})
 
-                    # 生成数据
-                    for idx in range(gen_num):
+            # 生成数据
+            for idx in range(gen_num):
+                # 亮点
+                features = prod['features'].split(',')
+                hightlights_list = random.sample(features, min(len(features), each_pick_hightlight))
+                hightlight_str = "、".join([h.strip() for h in hightlights_list])
 
-                        # 随机抽取 ${each_pick_hightlight} 个产品特性
-                        if each_pick_hightlight >= len(hightlights):
-                            # 超过打乱，增加随机性
-                            hightlights_list = random.shuffle(hightlights)
-                        else:
-                            hightlights_list = random.sample(hightlights, each_pick_hightlight)
-                        hightlight_str = "、".join(hightlights_list)
+                # 问题
+                customer_question_type = random.sample(dataset_yaml["customer_question_type"], each_pick_question)
+                customer_question_str = "、".join(customer_question_type)
 
-                        # 随机抽取 ${each_pick_question} 个提问角度
-                        if each_pick_question >= len(dataset_yaml["customer_question_type"]):
-                            # 超过打乱，增加随机性
-                            customer_question_type = random.shuffle(dataset_yaml["customer_question_type"])
-                        else:
-                            customer_question_type = random.sample(dataset_yaml["customer_question_type"], each_pick_question)
-                        customer_question_str = "、".join(customer_question_type)
+                # 产品信息
+                product_info_str = dataset_yaml["product_info_struct"][0].replace("{name}", prod['name'])
+                product_info_str += dataset_yaml["product_info_struct"][1].replace("{highlights}", hightlight_str)
 
-                        # 商品信息
-                        product_info_str = dataset_yaml["product_info_struct"][0].replace("{name}", product)
-                        product_info_str += dataset_yaml["product_info_struct"][1].replace("{highlights}", hightlight_str)
+                json_format = dataset_yaml["dataset_json_format"].replace("{product_info}", product_info_str)
+ 
+                content_str = (
+                    data_gen_setting["dataset_gen_prompt"]
+                    .replace("{role_type}", role_type)
+                    .replace("{character}", character)
+                    .replace("{product_info}", product_info_str)
+                    .replace("{customer_question}", customer_question_str)
+                    .replace("{each_conversation_qa}", str(data_gen_setting["each_conversation_qa"]))
+                    .replace(
+                        "{dataset_json_format}",
+                        json_format,
+                    )
+                )
 
-                        content_str = (
-                            data_gen_setting["dataset_gen_prompt"]
-                            .replace("{role_type}", role_type)
-                            .replace("{character}", character)
-                            .replace("{product_info}", product_info_str)
-                            .replace("{customer_question}", customer_question_str)
-                            .replace("{each_conversation_qa}", str(data_gen_setting["each_conversation_qa"]))
-                            .replace(
-                                "{dataset_json_format}",
-                                data_gen_setting["dataset_json_format"].replace("{product_info}", product_info_str),
-                            )
-                        )
+                print(f"\n Resquest [ {model_name} ] {idx + 1}/{gen_num} ==> {content_str} \n")
+                if model_name == "qwen":
+                    format_json = process_request(call_qwen_message, content_str, qwen_model_type[idx], model_name)
+                elif model_name == "ernie":
+                    format_json = process_request(call_ernie_message, content_str, api_key, model_name)
+                else:
+                    raise ValueError(f"model_name {model_name} not support")
 
-                        print(f"\n Resquest [ {model_name} ] {idx + 1}/{gen_num} ==> {content_str} \n")
-                        if model_name == "qwen":
-                            format_json = process_request(call_qwen_message, content_str, qwen_model_type[idx], model_name)
-                        elif model_name == "ernie":
-                            format_json = process_request(call_ernie_message, content_str, api_key, model_name)
-                        else:
-                            raise ValueError(f"model_name {model_name} not support")
+                if "conversation" in format_json and len(format_json["conversation"]) > 0:
+                    # 第一个结果因为节省 token，需要将 system 和 input 放回去
+                    conversation_setting = deepcopy(dataset_yaml["conversation_setting"])
+                    system_str = (
+                        conversation_setting["system"].replace("{role_type}", role_type).replace("{character}", character)
+                    )
+                    input_str = conversation_setting["first_input"].replace("{product_info}", product_info_str)
 
-                        if "conversation" in format_json and len(format_json["conversation"]) > 0:
+                    # 将第一个对话加入必要信息
+                    format_json["conversation"][0] = {
+                        "system": system_str,
+                        "input": input_str,
+                        "output": format_json["conversation"][0]["output"],
+                    }
+                else:
+                    format_json = {"Error": "Error"}
 
-                            # 第一个结果因为节省 token，需要将 system 和 input 放回去
-                            conversation_setting = deepcopy(dataset_yaml["conversation_setting"])
-                            system_str = (
-                                conversation_setting["system"].replace("{role_type}", role_type).replace("{character}", character)
-                            )
-                            input_str = conversation_setting["first_input"].replace("{product_info}", product_info_str)
+                print(f"\n Response [ {model_name} ] {idx + 1}/{gen_num} <== {format_json} \n")
+                gen_json[prod['name']].append(format_json)
 
-                            # 将第一个对话加入必要信息
-                            format_json["conversation"][0] = {
-                                "system": system_str,
-                                "input": input_str,
-                                "output": format_json["conversation"][0]["output"],
-                            }
-                        else:
-                            format_json = {"Error": "Error"}
+            pbar.update(1)
 
-                        print(f"\n Response [ {model_name} ] {idx + 1}/{gen_num} <== {format_json} \n")
-                        gen_json[product].append(format_json)
+            # 备份旧的
+            if save_json_path.exists():
+                save_json_path.rename(bk_json_path)
 
-                    pbar.update(1)
+            # 保存 json
+            with open(save_json_path, "w", encoding="utf-8") as f:
+                json.dump(gen_json, f, indent=4, ensure_ascii=False)
 
-                    # 备份旧的
-                    if save_json_path.exists():
-                        save_json_path.rename(bk_json_path)
-
-                    # 保存 json
-                    with open(save_json_path, "w", encoding="utf-8") as f:
-                        json.dump(gen_json, f, indent=4, ensure_ascii=False)
-
-                    # 如果保存成功，删掉旧的
-                    if bk_json_path.exists():
-                        bk_json_path.unlink()
+            # 如果保存成功，删掉旧的
+            if bk_json_path.exists():
+                bk_json_path.unlink()
 
 
 if __name__ == "__main__":
@@ -362,7 +355,7 @@ if __name__ == "__main__":
     parser.add_argument("model_name", type=str, choices=["qwen", "ernie"], help="Model name for data generation")
     parser.add_argument("--data_yaml", type=str, default="/root/autodl-tmp/Streamer-Sales/configs/conversation_cfg.yaml", help="data setting file path")
     parser.add_argument("--api_yaml", type=str, default="/root/autodl-tmp/Streamer-Sales/configs/api_cfg.yaml", help="api setting file path")
-    parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/Streamer-Sales/dataset/gen_dataset/train_dataset/response", help="generation json output dir")
+    parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/Streamer-Sales/dataset/gen_dataset/train_dataset/response/myproduct", help="generation json output dir")
     parser.add_argument("--specific_name", type=str, default="", help="Character name for data generation")
     args = parser.parse_args()
 
